@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Future Value (30-Year Projection) — Monthly + Annual Contributions</title>
+  <link rel="stylesheet" href="https://pyscript.net/releases/2024.1.1/core.css">
+  <script type="module" src="https://pyscript.net/releases/2024.1.1/core.js"></script>
+  <script src="https://cdn.plot.ly/plotly-2.32.0.min.js"></script>
+  <style>
+    :root { --bg:#0b0f19; --panel:#101726; --text:#e8eefc; --muted:#a7b1c2; --accent:#4aa3ff; }
+    body { background:var(--bg); color:var(--text); font-family:system-ui,Segoe UI,Roboto,sans-serif; margin:0; }
+    .wrap { max-width:1100px; margin:24px auto; padding:0 16px; }
+    .card { background:var(--panel); border-radius:16px; padding:20px; box-shadow:0 6px 20px rgba(0,0,0,.25); }
+    .grid { display:grid; gap:16px; }
+    @media (min-width:920px){ .grid { grid-template-columns:420px 1fr; } }
+    .label { font-weight:600; margin-top:10px; display:flex; justify-content:space-between; }
+    .val { color:var(--accent); font-variant-numeric: tabular-nums; }
+    input[type="range"], input[type="number"] { width:100%; }
+    .row { margin:6px 0 12px; }
+    .kpis { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:10px; margin-top:10px; }
+    .kpis > div { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:10px; }
+    .k { color:var(--muted); font-size:.85rem; }
+    .v { font-weight:700; font-variant-numeric: tabular-nums; }
+    #plot { height:460px; background:rgba(255,255,255,.02); border-radius:12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="card">
+      <h1>Future Value (30-Year Projection)</h1>
+      <div class="grid">
+        <div>
+          <label class="label">Initial Sum <span class="val" id="init_label">$0</span></label>
+          <div class="row"><input id="init_range" type="range" min="0" max="2000000" step="1000" value="500000"></div>
+          <div class="row"><input id="init_number" type="number" min="0" max="2000000" step="1000" value="500000"></div>
+
+          <label class="label">Annual Interest Rate <span class="val" id="rate_label">0.0%</span></label>
+          <div class="row"><input id="rate_range" type="range" min="0" max="100" step="0.1" value="5"></div>
+          <div class="row"><input id="rate_number" type="number" min="0" max="100" step="0.1" value="5"></div>
+
+          <label class="label">Annual Withdrawal <span class="val" id="wd_label">$0</span></label>
+          <div class="row"><input id="wd_range" type="range" min="0" max="2000000" step="1000" value="30000"></div>
+          <div class="row"><input id="wd_number" type="number" min="0" max="2000000" step="1000" value="30000"></div>
+
+          <label class="label">Annual Contribution (end of year) <span class="val" id="acontrib_label">$0</span></label>
+          <div class="row"><input id="acontrib_range" type="range" min="0" max="200000" step="100" value="6000"></div>
+          <div class="row"><input id="acontrib_number" type="number" min="0" max="200000" step="100" value="6000"></div>
+
+          <label class="label">Monthly Contribution (end of month) <span class="val" id="mcontrib_label">$0</span></label>
+          <div class="row"><input id="mcontrib_range" type="range" min="0" max="20000" step="50" value="500"></div>
+          <div class="row"><input id="mcontrib_number" type="number" min="0" max="20000" step="50" value="500"></div>
+
+          <div class="row" style="margin-top:8px;">
+            <label><input id="wd_start" type="checkbox"> Withdraw at <b>start</b> of each year</label>
+          </div>
+
+          <div class="kpis">
+            <div><div class="k">Final Balance (Year 30)</div><div class="v" id="final_balance">$0</div></div>
+            <div><div class="k">Break-even Year (if any)</div><div class="v" id="zero_year">—</div></div>
+            <div><div class="k">Total Withdrawn</div><div class="v" id="total_withdrawn">$0</div></div>
+            <div><div class="k">Total Contributed</div><div class="v" id="total_contrib">$0</div></div>
+          </div>
+          <p id="warning" style="color:#ffb54a; margin-top:8px;"></p>
+        </div>
+
+        <div id="plot"></div>
+      </div>
+      <p style="color:#a7b1c2; margin-top:10px;">Assumptions: <b>nominal</b> annual rate compounded monthly (rate/12 per month). Monthly contributions are added at end-of-month; annual contributions at end-of-year. Toggle applies withdrawals at start-of-year instead of end-of-year. Balance floors at $0. We can switch to an effective monthly rate ((1+r)^(1/12)-1) if you prefer.</p>
+    </div>
+  </div>
+
+  <py-config></py-config>
+  <py-script>
+from js import document, Plotly, JSON
+from pyodide.ffi import create_proxy
+import json
+
+YEARS = 30
+
+def fmt_money(x: float) -> str:
+    return "$" + f"{int(round(x)):,}"
+
+# withdraw_timing: "start" or "end"
+# NOMINAL monthly compounding: monthly_rate = rate_pct/100/12
+# Monthly contribution added end-of-month; annual at end-of-year.
+def simulate(initial: float, rate_pct: float, withdraw: float, acontrib: float, mcontrib: float, withdraw_timing: str):
+    r_month = (rate_pct / 100.0) / 12.0
+    balances = [initial]
+    b = initial
+    zero_year = None
+    total_withdrawn = 0.0
+    total_contrib = 0.0
+
+    for y in range(1, YEARS + 1):
+        if withdraw_timing == "start":
+            w = min(withdraw, b)
+            b -= w
+            total_withdrawn += w
+            if b < 0: b = 0
+
+        # 12 months of growth + monthly contributions
+        for _ in range(12):
+            b *= (1.0 + r_month)   # growth
+            b += mcontrib          # end-of-month contrib
+            total_contrib += mcontrib
+
+        # end-of-year contribution
+        b += acontrib
+        total_contrib += acontrib
+
+        if withdraw_timing == "end":
+            w = min(withdraw, b)
+            b -= w
+            total_withdrawn += w
+            if b < 0: b = 0
+
+        if b <= 0 and zero_year is None:
+            zero_year = y
+            b = 0.0
+
+        balances.append(b)
+
+    xs = list(range(0, YEARS + 1))
+    return xs, balances, zero_year, total_withdrawn, total_contrib
+
+# ---------- DOM refs ----------
+init_range = document.getElementById("init_range")
+init_number = document.getElementById("init_number")
+rate_range = document.getElementById("rate_range")
+rate_number = document.getElementById("rate_number")
+wd_range = document.getElementById("wd_range")
+wd_number = document.getElementById("wd_number")
+acontrib_range = document.getElementById("acontrib_range")
+acontrib_number = document.getElementById("acontrib_number")
+mcontrib_range = document.getElementById("mcontrib_range")
+mcontrib_number = document.getElementById("mcontrib_number")
+wd_start = document.getElementById("wd_start")
+
+init_label = document.getElementById("init_label")
+rate_label = document.getElementById("rate_label")
+wd_label = document.getElementById("wd_label")
+acontrib_label = document.getElementById("acontrib_label")
+mcontrib_label = document.getElementById("mcontrib_label")
+final_balance = document.getElementById("final_balance")
+zero_year = document.getElementById("zero_year")
+total_withdrawn = document.getElementById("total_withdrawn")
+total_contrib = document.getElementById("total_contrib")
+warning = document.getElementById("warning")
+plot_div = document.getElementById("plot")
+
+def sync_pair(range_el, number_el):
+    def on_range(evt=None):
+        number_el.value = range_el.value
+        update()
+    def on_number(evt=None):
+        range_el.value = number_el.value
+        update()
+    range_el.addEventListener("input", create_proxy(on_range))
+    number_el.addEventListener("input", create_proxy(on_number))
+
+# ---------- plotting ----------
+def draw(xs, balances, balances_nwd):
+    data_py = [
+        {
+            "x": xs,
+            "y": balances,
+            "type": "scatter",
+            "mode": "lines",
+            "name": "With withdrawals",
+            "line": {"width": 3}
+        },
+        {
+            "x": xs,
+            "y": balances_nwd,
+            "type": "scatter",
+            "mode": "lines",
+            "name": "No withdrawals",
+            "line": {"width": 2, "color": "red", "dash": "dot"}
+        }
+    ]
+    layout_py = {
+        "xaxis": {"title": "Year", "range": [0, YEARS]},
+        "yaxis": {"title": "Balance ($)", "rangemode": "tozero"},
+        "margin": {"t": 30, "r": 20, "l": 60, "b": 40},
+        "paper_bgcolor": "rgba(0,0,0,0)",
+        "plot_bgcolor": "rgba(0,0,0,0)",
+        "title": {"text": "Account Balance Over Time"},
+        "legend": {"orientation": "h", "x": 0, "y": 1.1}
+    }
+    config_py = {"responsive": True, "displayModeBar": False}
+    # JSON round-trip == plain JS objects for Plotly
+    data_js = JSON.parse(json.dumps(data_py))
+    layout_js = JSON.parse(json.dumps(layout_py))
+    config_js = JSON.parse(json.dumps(config_py))
+    Plotly.react(plot_div, data_js, layout_js, config_js)
+
+# ---------- update loop ----------
+def update(evt=None):
+    initial = float(init_number.value or 0)
+    rate = float(rate_number.value or 0)
+    withdraw = float(wd_number.value or 0)
+    acontrib = float(acontrib_number.value or 0)
+    mcontrib = float(mcontrib_number.value or 0)
+    timing = "start" if wd_start.checked else "end"
+
+    init_label.innerText = fmt_money(initial)
+    rate_label.innerText = f"{rate:.1f}%"
+    wd_label.innerText = fmt_money(withdraw)
+    acontrib_label.innerText = fmt_money(acontrib)
+    mcontrib_label.innerText = fmt_money(mcontrib)
+
+    xs, balances, zyear, tw, tc = simulate(initial, rate, withdraw, acontrib, mcontrib, timing)
+    # No-withdrawals scenario
+    _, balances_nwd, _, _, _ = simulate(initial, rate, 0, acontrib, mcontrib, timing)
+    draw(xs, balances, balances_nwd)
+
+    final_balance.innerText = fmt_money(balances[-1])
+    total_withdrawn.innerText = fmt_money(tw)
+    total_contrib.innerText = fmt_money(tc)
+    if zyear is None:
+        zero_year.innerText = "—"
+        warning.innerText = ""
+    else:
+        zero_year.innerText = str(zyear)
+        warning.innerText = f"Balance hits $0 in year {zyear}."
+
+# Wire up
+sync_pair(init_range, init_number)
+sync_pair(rate_range, rate_number)
+sync_pair(wd_range, wd_number)
+sync_pair(acontrib_range, acontrib_number)
+sync_pair(mcontrib_range, mcontrib_number)
+wd_start.addEventListener("change", create_proxy(update))
+
+# First render
+update()
+  </py-script>
+</body>
+</html>
