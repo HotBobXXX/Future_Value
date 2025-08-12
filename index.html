@@ -18,7 +18,7 @@
     .val { color:var(--accent); font-variant-numeric: tabular-nums; }
     input[type="range"], input[type="number"] { width:100%; }
     .row { margin:6px 0 12px; }
-    .kpis { display:grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap:10px; margin-top:10px; }
+    .kpis { display:grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap:10px; margin-top:10px; }
     .kpis > div { background:rgba(255,255,255,.06); border:1px solid rgba(255,255,255,.1); border-radius:10px; padding:10px; }
     .k { color:var(--muted); font-size:.85rem; }
     .v { font-weight:700; font-variant-numeric: tabular-nums; }
@@ -43,6 +43,10 @@
           <div class="row"><input id="wd_range" type="range" min="0" max="2000000" step="1000" value="30000"></div>
           <div class="row"><input id="wd_number" type="number" min="0" max="2000000" step="1000" value="30000"></div>
 
+          <label class="label">Monthly Withdrawal (end of month) <span class="val" id="mwd_label">$0</span></label>
+          <div class="row"><input id="mwd_range" type="range" min="0" max="20000" step="50" value="0"></div>
+          <div class="row"><input id="mwd_number" type="number" min="0" max="20000" step="50" value="0"></div>
+
           <label class="label">Annual Contribution (end of year) <span class="val" id="acontrib_label">$0</span></label>
           <div class="row"><input id="acontrib_range" type="range" min="0" max="200000" step="100" value="6000"></div>
           <div class="row"><input id="acontrib_number" type="number" min="0" max="200000" step="100" value="6000"></div>
@@ -52,21 +56,22 @@
           <div class="row"><input id="mcontrib_number" type="number" min="0" max="20000" step="50" value="500"></div>
 
           <div class="row" style="margin-top:8px;">
-            <label><input id="wd_start" type="checkbox"> Withdraw at <b>start</b> of each year</label>
+            <label><input id="wd_start" type="checkbox"> Withdraw <b>annual</b> amount at <b>start</b> of each year <span style="color:#a7b1c2">(monthly withdrawals applied at end of month)</span></label>
           </div>
 
           <div class="kpis">
-            <div><div class="k">Final Balance (Year 30)</div><div class="v" id="final_balance">$0</div></div>
-            <div><div class="k">Break-even Year (if any)</div><div class="v" id="zero_year">—</div></div>
-            <div><div class="k">Total Withdrawn</div><div class="v" id="total_withdrawn">$0</div></div>
+            <div><div class="k">Balance (Year 10)</div><div class="v" id="y10_balance">$0</div></div>
+            <div><div class="k">Balance (Year 20)</div><div class="v" id="y20_balance">$0</div></div>
+            <div><div class="k">Final Balance (Year 30)</div><div class="v" id="final_balance">$0</div></div>            <div><div class="k">Total Withdrawn</div><div class="v" id="total_withdrawn">$0</div></div>
             <div><div class="k">Total Contributed</div><div class="v" id="total_contrib">$0</div></div>
+            <div><div class="k">Total Interest Earned</div><div class="v" id="total_interest">$0</div></div>
           </div>
           <p id="warning" style="color:#ffb54a; margin-top:8px;"></p>
         </div>
 
         <div id="plot"></div>
       </div>
-      <p style="color:#a7b1c2; margin-top:10px;">Assumptions: <b>nominal</b> annual rate compounded monthly (rate/12 per month). Monthly contributions are added at end-of-month; annual contributions at end-of-year. Toggle applies withdrawals at start-of-year instead of end-of-year. Balance floors at $0. We can switch to an effective monthly rate ((1+r)^(1/12)-1) if you prefer.</p>
+      <p style="color:#a7b1c2; margin-top:10px;">Assumptions: <b>nominal</b> annual rate compounded monthly (rate/12 per month). Monthly contributions and withdrawals are applied at end-of-month; annual contributions at end-of-year. Toggle applies withdrawals at start-of-year instead of end-of-year. Balance floors at $0. We can switch to an effective monthly rate ((1+r)^(1/12)-1) if you prefer.</p>
     </div>
   </div>
 
@@ -78,41 +83,68 @@ import json
 
 YEARS = 30
 
+# format dollars
+
 def fmt_money(x: float) -> str:
     return "$" + f"{int(round(x)):,}"
 
-# withdraw_timing: "start" or "end"
-# NOMINAL monthly compounding: monthly_rate = rate_pct/100/12
-# Monthly contribution added end-of-month; annual at end-of-year.
-def simulate(initial: float, rate_pct: float, withdraw: float, acontrib: float, mcontrib: float, withdraw_timing: str):
+# Simulation (monthly compounding, monthly + annual contributions, start/end withdrawals)
+
+def simulate(initial: float, rate_pct: float, withdraw: float, acontrib: float, mcontrib: float, mwithdraw: float, withdraw_timing: str):
     r_month = (rate_pct / 100.0) / 12.0
     balances = [initial]
     b = initial
     zero_year = None
     total_withdrawn = 0.0
     total_contrib = 0.0
+    interest_by_year = []
+    contrib_by_year = []
+    withdraw_by_year = []
 
     for y in range(1, YEARS + 1):
+        # Annual withdrawal at start-of-year (before monthly growth)
+        wd_y = 0.0
         if withdraw_timing == "start":
             w = min(withdraw, b)
             b -= w
             total_withdrawn += w
+            wd_y += w
             if b < 0: b = 0
 
-        # 12 months of growth + monthly contributions
+        # Per-year accumulators
+        interest_accum = 0.0
+        contrib_accum = 0.0
+        withdraw_accum = wd_y
+
+        # 12 months: interest -> monthly contrib -> monthly withdraw
         for _ in range(12):
-            b *= (1.0 + r_month)   # growth
-            b += mcontrib          # end-of-month contrib
+            interest_m = b * r_month
+            interest_accum += interest_m
+            b += interest_m
+
+            # monthly contribution (end of month)
+            b += mcontrib
             total_contrib += mcontrib
+            contrib_accum += mcontrib
+
+            # monthly withdrawal (end of month)
+            w_m = min(mwithdraw, b)
+            b -= w_m
+            total_withdrawn += w_m
+            withdraw_accum += w_m
+            if b < 0: b = 0
 
         # end-of-year contribution
         b += acontrib
         total_contrib += acontrib
+        contrib_accum += acontrib
 
+        # Annual withdrawal at end-of-year
         if withdraw_timing == "end":
             w = min(withdraw, b)
             b -= w
             total_withdrawn += w
+            withdraw_accum += w
             if b < 0: b = 0
 
         if b <= 0 and zero_year is None:
@@ -120,11 +152,14 @@ def simulate(initial: float, rate_pct: float, withdraw: float, acontrib: float, 
             b = 0.0
 
         balances.append(b)
+        interest_by_year.append(interest_accum)
+        contrib_by_year.append(contrib_accum)
+        withdraw_by_year.append(withdraw_accum)
 
     xs = list(range(0, YEARS + 1))
-    return xs, balances, zero_year, total_withdrawn, total_contrib
+    return xs, balances, zero_year, total_withdrawn, total_contrib, interest_by_year, contrib_by_year, withdraw_by_year
 
-# ---------- DOM refs ----------
+# DOM refs
 init_range = document.getElementById("init_range")
 init_number = document.getElementById("init_number")
 rate_range = document.getElementById("rate_range")
@@ -135,6 +170,8 @@ acontrib_range = document.getElementById("acontrib_range")
 acontrib_number = document.getElementById("acontrib_number")
 mcontrib_range = document.getElementById("mcontrib_range")
 mcontrib_number = document.getElementById("mcontrib_number")
+mwd_range = document.getElementById("mwd_range")
+mwd_number = document.getElementById("mwd_number")
 wd_start = document.getElementById("wd_start")
 
 init_label = document.getElementById("init_label")
@@ -142,12 +179,17 @@ rate_label = document.getElementById("rate_label")
 wd_label = document.getElementById("wd_label")
 acontrib_label = document.getElementById("acontrib_label")
 mcontrib_label = document.getElementById("mcontrib_label")
+mwd_label = document.getElementById("mwd_label")
 final_balance = document.getElementById("final_balance")
-zero_year = document.getElementById("zero_year")
+y10_balance = document.getElementById("y10_balance")
+y20_balance = document.getElementById("y20_balance")
 total_withdrawn = document.getElementById("total_withdrawn")
 total_contrib = document.getElementById("total_contrib")
+total_interest = document.getElementById("total_interest")
 warning = document.getElementById("warning")
 plot_div = document.getElementById("plot")
+
+# sync helpers
 
 def sync_pair(range_el, number_el):
     def on_range(evt=None):
@@ -159,49 +201,69 @@ def sync_pair(range_el, number_el):
     range_el.addEventListener("input", create_proxy(on_range))
     number_el.addEventListener("input", create_proxy(on_number))
 
-# ---------- plotting ----------
-def draw(xs, balances, balances_nwd):
+# plotting
+
+def draw(xs, balances, balances_nwd, interest_by_year, contrib_by_year, withdraw_by_year):
+    # customdata for hover: [interest, contributions, withdrawals]
+    custom = [[interest_by_year[i], contrib_by_year[i], withdraw_by_year[i]] for i in range(YEARS)]
     data_py = [
         {
-            "x": xs,
-            "y": balances,
-            "type": "scatter",
-            "mode": "lines",
-            "name": "With withdrawals",
-            "line": {"width": 3}
+            "x": list(range(1, YEARS + 1)),
+            "y": interest_by_year,
+            "type": "bar",
+            "name": "Interest (per year)",
+            "marker": {"color": "rgba(255, 220, 0, 0.22)", "line": {"width": 0}},
+            "yaxis": "y", "opacity": 0.22,
+            "customdata": custom,
+            "hovertemplate": "Year %{x}<br>Interest: %{y:$,.0f}<br>Contrib: %{customdata[1]:$,.0f}<br>Withdrawn: %{customdata[2]:$,.0f}<extra></extra>"
         },
-        {
-            "x": xs,
-            "y": balances_nwd,
-            "type": "scatter",
-            "mode": "lines",
-            "name": "No withdrawals",
-            "line": {"width": 2, "color": "red", "dash": "dot"}
-        }
+        {"x": xs, "y": balances, "type": "scatter", "mode": "lines", "name": "With withdrawals", "yaxis": "y2", "line": {"width": 3}},
+        {"x": xs, "y": balances_nwd, "type": "scatter", "mode": "lines", "name": "No withdrawals", "yaxis": "y2", "line": {"width": 2, "color": "red", "dash": "dot"}}
     ]
     layout_py = {
-        "xaxis": {"title": "Year", "range": [0, YEARS]},
-        "yaxis": {"title": "Balance ($)", "rangemode": "tozero"},
-        "margin": {"t": 30, "r": 20, "l": 60, "b": 40},
+        "font": {"color": "#ffffff"},
+        "xaxis": {
+            "title": {"text": "Year", "font": {"color": "#ffffff"}},
+            "tickfont": {"color": "#ffffff"},
+            "range": [0, YEARS]
+        },
+        "yaxis": {
+            "title": {"text": "Interest ($/yr)", "font": {"color": "#ffffff"}},
+            "tickfont": {"color": "#ffffff"},
+            "rangemode": "tozero",
+            "showgrid": False
+        },
+        "yaxis2": {
+            "title": {"text": "Balance ($)", "font": {"color": "#ffffff"}},
+            "tickfont": {"color": "#ffffff"},
+            "overlaying": "y",
+            "side": "right",
+            "rangemode": "tozero"
+        },
+        "margin": {"t": 80, "r": 60, "l": 70, "b": 40},
         "paper_bgcolor": "rgba(0,0,0,0)",
         "plot_bgcolor": "rgba(0,0,0,0)",
-        "title": {"text": "Account Balance Over Time"},
-        "legend": {"orientation": "h", "x": 0, "y": 1.1}
+        "title": {"text": "Account Balance Over Time", "font": {"color": "#ffffff"}},
+        "legend": {"orientation": "h", "x": 0, "xanchor": "left", "y": 1.02, "yanchor": "top", "font": {"color": "#ffffff"}, "bgcolor": "rgba(16,23,38,0.6)", "bordercolor": "rgba(255,255,255,0.15)", "borderwidth": 1},
+        "hovermode": "x unified",
+        "hoverlabel": {"font": {"color": "#ffffff"}, "bgcolor": "rgba(16,23,38,0.92)", "bordercolor": "rgba(255,255,255,0.25)"}
     }
     config_py = {"responsive": True, "displayModeBar": False}
-    # JSON round-trip == plain JS objects for Plotly
+
     data_js = JSON.parse(json.dumps(data_py))
     layout_js = JSON.parse(json.dumps(layout_py))
     config_js = JSON.parse(json.dumps(config_py))
     Plotly.react(plot_div, data_js, layout_js, config_js)
 
-# ---------- update loop ----------
+# update loop
+
 def update(evt=None):
     initial = float(init_number.value or 0)
     rate = float(rate_number.value or 0)
     withdraw = float(wd_number.value or 0)
     acontrib = float(acontrib_number.value or 0)
     mcontrib = float(mcontrib_number.value or 0)
+    mwithdraw = float(mwd_number.value or 0)
     timing = "start" if wd_start.checked else "end"
 
     init_label.innerText = fmt_money(initial)
@@ -209,31 +271,35 @@ def update(evt=None):
     wd_label.innerText = fmt_money(withdraw)
     acontrib_label.innerText = fmt_money(acontrib)
     mcontrib_label.innerText = fmt_money(mcontrib)
+    mwd_label.innerText = fmt_money(mwithdraw)
 
-    xs, balances, zyear, tw, tc = simulate(initial, rate, withdraw, acontrib, mcontrib, timing)
-    # No-withdrawals scenario
-    _, balances_nwd, _, _, _ = simulate(initial, rate, 0, acontrib, mcontrib, timing)
-    draw(xs, balances, balances_nwd)
+    xs, balances, zyear, tw, tc, interest, contribs_y, withdraws_y = simulate(initial, rate, withdraw, acontrib, mcontrib, mwithdraw, timing)
+    _, balances_nwd, _, _, _, _, _, _ = simulate(initial, rate, 0, acontrib, mcontrib, 0, timing)
+    draw(xs, balances, balances_nwd, interest, contribs_y, withdraws_y)
 
+    # KPI updates for year 10, 20, 30
+    y10_balance.innerText = fmt_money(balances[10])
+    y20_balance.innerText = fmt_money(balances[20])
     final_balance.innerText = fmt_money(balances[-1])
     total_withdrawn.innerText = fmt_money(tw)
     total_contrib.innerText = fmt_money(tc)
+    total_interest.innerText = fmt_money(sum(interest))
+
     if zyear is None:
-        zero_year.innerText = "—"
         warning.innerText = ""
     else:
-        zero_year.innerText = str(zyear)
         warning.innerText = f"Balance hits $0 in year {zyear}."
 
-# Wire up
+# wire up controls
 sync_pair(init_range, init_number)
 sync_pair(rate_range, rate_number)
 sync_pair(wd_range, wd_number)
 sync_pair(acontrib_range, acontrib_number)
 sync_pair(mcontrib_range, mcontrib_number)
+sync_pair(mwd_range, mwd_number)
 wd_start.addEventListener("change", create_proxy(update))
 
-# First render
+# first render
 update()
   </py-script>
 </body>
